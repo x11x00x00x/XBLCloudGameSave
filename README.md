@@ -1,9 +1,4 @@
-# XBL Cloud Game Save Sync
-
-<img width="1270" height="714" alt="Screenshot 2026-06-02 at 1 37 10 AM" src="https://github.com/user-attachments/assets/e5154cbe-7fdd-40d6-938d-26670ed7f993" />
---
-<img width="1256" height="676" alt="Screenshot 2026-06-02 at 1 37 26 AM" src="https://github.com/user-attachments/assets/d1020e20-a473-4d53-af9e-da2952623167" />
-
+# Original Xbox Save Metadata, Backup & Upload
 
 A small homebrew application for the **original Xbox** (built with [nxdk](https://github.com/XboxDev/nxdk)) that:
 
@@ -12,12 +7,12 @@ A small homebrew application for the **original Xbox** (built with [nxdk](https:
 2. Scans every game save under `E:\UDATA` and reads its metadata.
 3. Dumps the console EEPROM and writes the decrypted HDD key to a file.
 4. Writes a human-readable report of all saves.
-5. Compresses each game's saves individually into a per-game archive.
+5. Zips each game's saves individually into a per-game archive.
 6. **Uploads** the EEPROM, HDD key and each game's `.dukex` archive to the
-   xb.live website, where they appear under a **Game Saves** dashboard
+   Insignia Stats website, where they appear under a **Game Saves** dashboard
    tab.
 
-All local output is written to a new `E:\GameSaves\` folder. The upload step is
+All local output is written to a new `E:\test\` folder. The upload step is
 skipped automatically if there is no network or you do not finish logging in.
 
 ## End-to-end flow
@@ -27,7 +22,7 @@ Xbox app                         auth.insigniastats.live        Insignia Stats s
 --------                         -----------------------        -------------------
 (first run only) POST /api/auth/device ▶ user_code + QR URL
 show QR on TV  ◀── you scan with phone, log in on the web page
-poll /api/auth/device/token ──▶  sessionKey  ── saved to E:\GameSaves\insignia_session.txt
+poll /api/auth/device/token ──▶  sessionKey  ── saved to E:\test\insignia_session.txt
 (later runs)     GET /api/auth/user  ▶ validate saved session (no QR if still valid)
 scan E:\UDATA, dump EEPROM/HDD key
 GET  /api/me/xbox-saves/manifest      (X-Session-Key) ─────────▶ returns stored fingerprints
@@ -41,19 +36,20 @@ GET  /api/me/xbox-saves/download/<id> (titles on server but not local) ◀ pulls
 
 ## Output files
 
-
-After running, `E:\GameSaves\` contains:
+After running, `E:\test\` contains:
 
 | File | Contents |
 |------|----------|
 | `eeprom.bin` | Raw 256-byte EEPROM dump |
 | `hdd_key.txt` | Decrypted 16-byte HDD key (hex) and console serial number |
 | `saves_report.txt` | Per-title and per-save metadata report |
-| `<TitleID>.dukex` | One archive per game, holding that game's saves (`.dukex`) |
+| `<TitleID>.dukex` | One archive per game, holding that game's saves (a zip renamed to `.dukex`) |
 
-Each `<TitleID>.dukex` (e.g. `4D530064.dukex`) is a compressed archive. It contains everything under that game's
+Each `<TitleID>.dukex` (e.g. `4D530064.dukex`) is a standard zip archive whose
+extension has been changed to `.dukex`. It contains everything under that game's
 `E:\UDATA\<TitleID>\` folder, with entry names relative to it (e.g.
-`TitleMeta.xbx`, `001aecf7/SaveMeta.xbx`).
+`TitleMeta.xbx`, `001aecf7/SaveMeta.xbx`). Rename it back to `.zip` to open it
+with any zip tool.
 
 ### Example `saves_report.txt`
 
@@ -97,16 +93,24 @@ it from the EEPROM at boot, correctly for every motherboard revision). It still
 dumps the raw EEPROM to `eeprom.bin` via `HalReadSMBusValue`, and reads the
 console serial number from that dump. See [`src/eeprom_export.c`](src/eeprom_export.c).
 
-### Login, saved sessions & incremental upload
+### Zipping
 
-<img width="660" height="1434" alt="image0-3" src="https://github.com/user-attachments/assets/d613f1ec-3d98-4586-8e65-82848dd8a4d6" />
+[`src/zip_export.c`](src/zip_export.c) uses [miniz](https://github.com/richgel999/miniz)
+(vendored in [`third_party/`](third_party/)). One archive is produced per game
+(per `UDATA\<TitleID>` folder). Each archive is streamed to disk through a WinAPI
+write callback, compressing one source file at a time, so a game's saves do not
+need to fit in the console's 64 MB of RAM. After an archive is written as
+`<TitleID>.zip` it is renamed to `<TitleID>.dukex` with `MoveFile` (see
+[`src/main.c`](src/main.c)).
+
+### Login, saved sessions & incremental upload
 
 - The QR login and HTTPS client are adapted from `XboxQRCodeLogin`. The device
   flow lives in [`src/net_auth.c`](src/net_auth.c); the TLS transport in
   [`third_party/https_client.c`](third_party/https_client.c) (lwIP sockets +
   mbed TLS, **certificate verification disabled** — demo-grade).
 - **Saved login:** after a successful login the session key is written to
-  `E:\GameSaves\insignia_session.txt` ([`src/session_store.c`](src/session_store.c)).
+  `E:\test\insignia_session.txt` ([`src/session_store.c`](src/session_store.c)).
   On the next run the app validates it against the Insignia auth API
   (`GET /api/auth/user`) and reuses it — the QR code only reappears if the
   session is missing or no longer valid.
@@ -129,7 +133,8 @@ console serial number from that dump. See [`src/eeprom_export.c`](src/eeprom_exp
   `E:\UDATA\<TitleID>\`. To avoid clobbering newer local saves, a title already
   present locally is never overwritten by the download step.
 - The destination host is set by `UPLOAD_HOST` / `UPLOAD_PORT` in
-  [`src/main.c`](src/main.c) (default `xb.live:443`).
+  [`src/main.c`](src/main.c) (default `xb.live:443`). Change these to match your
+  deployment of the Insignia Stats server.
 
 ## Building
 
@@ -179,12 +184,46 @@ This app runs unsigned code, so it requires a **modded original Xbox**
    Subsequent runs reuse the saved login and skip the QR step.
 4. The app then scans, backs up, and uploads automatically, printing progress
    on screen. Only new or changed game saves are uploaded; unchanged games are
-   skipped. The local copy still lands in `E:\GameSaves\`.
+   skipped. The local copy still lands in `E:\test\`.
 5. Open the website, go to **Dashboard ▸ Game Saves**, and your games, EEPROM
    and (password-gated) HDD key are there.
 
 It can also be booted from a burned disc or in [XEMU](https://xemu.app/) using
 the generated `.iso` (networking required for the login/upload steps).
+
+## Website integration (Insignia Stats)
+
+The companion changes in the `insignia stats` server expose:
+
+| Route | Purpose |
+|-------|---------|
+| `POST /api/me/xbox-saves/console-data` | Console uploads EEPROM (base64) + HDD key + serial |
+| `POST /api/me/xbox-saves/game` | Console uploads one `.dukex` as a raw binary body (metadata in query/headers, incl. fingerprint) |
+| `GET /api/me/xbox-saves/manifest` | Console fetches stored `TITLEID=FINGERPRINT` lines for incremental upload |
+| `GET /api/me/xbox-saves` | Dashboard lists games + console data (no secrets) |
+| `GET /api/me/xbox-saves/download/:titleId` | Authenticated `.dukex` download |
+| `GET /api/me/xbox-saves/eeprom` | Authenticated `eeprom.bin` download |
+| `GET /api/me/xbox-saves/hdd-key` | Returns the HDD key JSON (`sessionKey` + optional `console_id`) |
+| `POST /api/me/xbox-saves/reveal-hdd-key` | Same as `GET /hdd-key` (session key only; kept for compatibility) |
+
+- Uploaded files are stored under `xbox-private/<user>/` on the server, which is
+  blocked from static serving and only handed out through the authenticated
+  routes above.
+- The HDD key is encrypted at rest with **AES-256-GCM**. The master key is a
+  baked-in random constant in `server.js` (`XBOX_HDD_MASTER_KEY`); override it
+  with an environment variable of the same name for stronger key management.
+  Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+  Changing the key makes previously stored HDD keys undecryptable (consoles
+  would need to re-upload).
+- Viewing the HDD key uses the same **session key** as other dashboard routes
+  (no separate email/password step). Anyone with a valid session key can fetch it,
+  so treat your session like a password.
+
+## Security warning
+
+`eeprom.bin` and `hdd_key.txt` are sensitive. Anyone with them can unlock and
+read your hard drive. Copy them somewhere safe and delete them from the console
+if it is shared or networked.
 
 ## Limitations
 
@@ -192,12 +231,13 @@ the generated `.iso` (networking required for the login/upload steps).
   inside proprietary save files is not parsed.
 - Non-save `UDATA` folders (such as dashboard/network config) still appear in
   the report as titles.
-- Compressing every game can take several minutes on real hardware..
+- Zipping every game can take several minutes on real hardware; there is no
+  progress bar within the zip step.
 - Per-game archives are named by Title ID (e.g. `4D530064.dukex`) so the
   filenames are always valid; the readable game name is in `saves_report.txt`.
-- Individual files larger than 16 MB are skipped to protect
+- Individual files larger than 16 MB are skipped by the zipper to protect
   console memory; a whole game's `.dukex` larger than 32 MB is skipped by the
-  uploader (it is still written locally to `E:\GameSaves\`).
+  uploader (it is still written locally to `E:\test\`).
 - Assumes a normal (modded) retail kernel with a readable EEPROM.
 
 ## Layout

@@ -138,6 +138,8 @@ BOOL uploadConsoleData(const char *host, const char *port, const char *sessionKe
               appendStr(&body, &len, &cap, hddKeyHex ? hddKeyHex : "", TRUE) &&
               appendStr(&body, &len, &cap, "\",\"eeprom_base64\":\"", FALSE) &&
               appendStr(&body, &len, &cap, eepromB64, FALSE) &&
+              appendStr(&body, &len, &cap, "\",\"console_id_scheme\":\"", FALSE) &&
+              appendStr(&body, &len, &cap, XBOX_CONSOLE_ID_SCHEME, FALSE) &&
               appendStr(&body, &len, &cap, "\"}", FALSE);
     free(eepromB64);
     if (!ok) {
@@ -169,12 +171,12 @@ BOOL uploadConsoleData(const char *host, const char *port, const char *sessionKe
 }
 
 BOOL uploadGameDukex(const char *host, const char *port, const char *sessionKey,
-                     const char *consoleId, const char *hddKeyHex,
+                     const char *consoleId, const char *serial, const char *hddKeyHex,
                      const char *profile, const char *profileLabel,
                      const char *titleId, const char *titleName, int saveCount,
                      unsigned long long totalBytes, const char *fingerprint,
                      unsigned long long saveModifiedUnix, const char *manifestJson,
-                     const char *dukexPath)
+                     const char *contentHash, const char *dukexPath)
 {
     HANDLE h = CreateFile(dukexPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                           FILE_ATTRIBUTE_NORMAL, NULL);
@@ -212,16 +214,18 @@ BOOL uploadGameDukex(const char *host, const char *port, const char *sessionKey,
         return FALSE;
     }
 
-    /* Metadata travels in the query string + headers; the body is the raw file. */
-    /* Always send the HDD key so the server can derive a stable console_id even
-     * when the session has no console_id yet (e.g. first run / console-data retry).
-     * This keeps every backup from the same Xbox under one console_id. */
-    char path[820];
+    /* Metadata travels in the query string + headers; the body is the raw file.
+     * Always send HDD key + serial + console_id_scheme so the server can derive a
+     * stable console_id (v2 = HDD+serial; legacy uploads used HDD key only). */
+    char path[920];
     snprintf(path, sizeof(path),
-             "/api/me/xbox-saves/game?title_id=%s&console_id=%s&hdd_key_hex=%s&profile=%s&save_count=%d&total_bytes=%llu&fingerprint=%s&save_modified=%llu",
+             "/api/me/xbox-saves/game?title_id=%s&console_id=%s&hdd_key_hex=%s&serial=%s&"
+             "console_id_scheme=%s&profile=%s&save_count=%d&total_bytes=%llu&fingerprint=%s&"
+             "save_modified=%llu",
              titleId, consoleId && consoleId[0] ? consoleId : "unknown",
-             hddKeyHex && hddKeyHex[0] ? hddKeyHex : "", profile ? profile : "", saveCount,
-             totalBytes, fingerprint ? fingerprint : "", saveModifiedUnix);
+             hddKeyHex && hddKeyHex[0] ? hddKeyHex : "", serial ? serial : "",
+             XBOX_CONSOLE_ID_SCHEME, profile ? profile : "", saveCount, totalBytes,
+             fingerprint ? fingerprint : "", saveModifiedUnix);
 
     char skHeader[256];
     snprintf(skHeader, sizeof(skHeader), "X-Session-Key: %s", sessionKey);
@@ -257,7 +261,13 @@ BOOL uploadGameDukex(const char *host, const char *port, const char *sessionKey,
         }
     }
 
-    const char *headers[5];
+    char contentHashHeader[128];
+    contentHashHeader[0] = '\0';
+    if (contentHash && contentHash[0]) {
+        snprintf(contentHashHeader, sizeof(contentHashHeader), "X-Content-Hash: %s", contentHash);
+    }
+
+    const char *headers[6];
     int nHeaders = 0;
     headers[nHeaders++] = skHeader;
     headers[nHeaders++] = nameHeader;
@@ -266,6 +276,9 @@ BOOL uploadGameDukex(const char *host, const char *port, const char *sessionKey,
     }
     if (manifestHeader[0]) {
         headers[nHeaders++] = manifestHeader;
+    }
+    if (contentHashHeader[0]) {
+        headers[nHeaders++] = contentHashHeader;
     }
 
     UploadProgressCtx prog;
@@ -458,6 +471,293 @@ BOOL confirmXblRestored(const char *host, const char *port, const char *sessionK
     int r = https_request(host, port, "POST", path, "application/json", headers, 1, body, blen, resp,
                           sizeof(resp), NULL, NULL);
     return (r == 0) && responseIsOk(resp);
+}
+
+static BOOL titleIdEqualI(const char *a, const char *b)
+{
+    if (!a || !b) {
+        return FALSE;
+    }
+    return _stricmp(a, b) == 0;
+}
+
+static BOOL profileEqual(const char *a, const char *b)
+{
+    if (!a) {
+        a = "";
+    }
+    if (!b) {
+        b = "";
+    }
+    return strcmp(a, b) == 0;
+}
+
+static BOOL isHexHashField(const char *s)
+{
+    if (!s || !s[0]) {
+        return FALSE;
+    }
+    size_t n = strlen(s);
+    if (n < 16 || n > 128) {
+        return FALSE;
+    }
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* Parses "console:profile:title=fingerprint|mod|hash|nosync" from one manifest line. */
+static BOOL manifestParseLine(const char *lineStart, const char *lineEnd, char *consoleId,
+                              size_t consoleIdSz, char *profile, size_t profileSz, char *titleId,
+                              size_t titleIdSz, char *fingerprint, size_t fingerprintSz,
+                              unsigned long long *modOut, char *contentHash, size_t contentHashSz)
+{
+    if (consoleId && consoleIdSz > 0) {
+        consoleId[0] = '\0';
+    }
+    if (profile && profileSz > 0) {
+        profile[0] = '\0';
+    }
+    if (titleId && titleIdSz > 0) {
+        titleId[0] = '\0';
+    }
+    if (fingerprint && fingerprintSz > 0) {
+        fingerprint[0] = '\0';
+    }
+    if (contentHash && contentHashSz > 0) {
+        contentHash[0] = '\0';
+    }
+    if (modOut) {
+        *modOut = 0;
+    }
+    if (!lineStart || lineStart >= lineEnd) {
+        return FALSE;
+    }
+
+    const char *eq = strchr(lineStart, '=');
+    if (!eq || eq >= lineEnd) {
+        return FALSE;
+    }
+
+    const char *key = lineStart;
+    size_t keyLen = (size_t)(eq - key);
+    char keyBuf[160];
+    if (keyLen >= sizeof(keyBuf)) {
+        return FALSE;
+    }
+    memcpy(keyBuf, key, keyLen);
+    keyBuf[keyLen] = '\0';
+
+    const char *c1 = strchr(keyBuf, ':');
+    if (c1) {
+        size_t clen = (size_t)(c1 - keyBuf);
+        if (consoleId && clen < consoleIdSz) {
+            memcpy(consoleId, keyBuf, clen);
+            consoleId[clen] = '\0';
+        }
+        const char *c2 = strchr(c1 + 1, ':');
+        if (c2) {
+            size_t plen = (size_t)(c2 - (c1 + 1));
+            if (profile && plen < profileSz) {
+                memcpy(profile, c1 + 1, plen);
+                profile[plen] = '\0';
+            }
+            if (titleId) {
+                strncpy(titleId, c2 + 1, titleIdSz - 1);
+                titleId[titleIdSz - 1] = '\0';
+            }
+        } else if (titleId) {
+            strncpy(titleId, c1 + 1, titleIdSz - 1);
+            titleId[titleIdSz - 1] = '\0';
+        }
+    } else if (titleId) {
+        strncpy(titleId, keyBuf, titleIdSz - 1);
+        titleId[titleIdSz - 1] = '\0';
+    }
+
+    char valBuf[256];
+    size_t valLen = (size_t)(lineEnd - (eq + 1));
+    if (valLen >= sizeof(valBuf)) {
+        return FALSE;
+    }
+    memcpy(valBuf, eq + 1, valLen);
+    valBuf[valLen] = '\0';
+
+    size_t vlen = strlen(valBuf);
+    if (vlen >= 7 && strcmp(valBuf + vlen - 7, "|nosync") == 0) {
+        valBuf[vlen - 7] = '\0';
+    }
+
+    const char *fp = valBuf;
+    const char *mp = strchr(fp, '|');
+    if (!mp) {
+        if (fingerprint) {
+            strncpy(fingerprint, fp, fingerprintSz - 1);
+            fingerprint[fingerprintSz - 1] = '\0';
+        }
+        return titleId && titleId[0];
+    }
+
+    if (fingerprint) {
+        size_t flen = (size_t)(mp - fp);
+        if (flen >= fingerprintSz) {
+            flen = fingerprintSz - 1;
+        }
+        memcpy(fingerprint, fp, flen);
+        fingerprint[flen] = '\0';
+    }
+
+    mp++;
+    if (modOut) {
+        while (*mp >= '0' && *mp <= '9') {
+            *modOut = *modOut * 10ULL + (unsigned long long)(*mp - '0');
+            mp++;
+        }
+    }
+
+    if (*mp == '|') {
+        mp++;
+        if (isHexHashField(mp) && contentHash && contentHashSz > 0) {
+            strncpy(contentHash, mp, contentHashSz - 1);
+            contentHash[contentHashSz - 1] = '\0';
+        }
+    }
+
+    return titleId && titleId[0];
+}
+
+static void manifestEachLine(const char *manifest,
+                             void (*fn)(const char *consoleId, const char *profile,
+                                        const char *titleId, const char *fingerprint,
+                                        unsigned long long mod, const char *contentHash, void *ctx),
+                             void *ctx)
+{
+    if (!manifest || !fn) {
+        return;
+    }
+    const char *p = manifest;
+    while (*p) {
+        const char *lineStart = p;
+        while (*p && *p != '\r' && *p != '\n') {
+            p++;
+        }
+        const char *lineEnd = p;
+        while (*p == '\r' || *p == '\n') {
+            p++;
+        }
+        if (lineEnd > lineStart) {
+            char consoleId[40];
+            char prof[40];
+            char tid[64];
+            char fp[24];
+            char hash[129];
+            unsigned long long mod = 0;
+            if (manifestParseLine(lineStart, lineEnd, consoleId, sizeof(consoleId), prof,
+                                  sizeof(prof), tid, sizeof(tid), fp, sizeof(fp), &mod, hash,
+                                  sizeof(hash))) {
+                fn(consoleId, prof, tid, fp, mod, hash[0] ? hash : NULL, ctx);
+            }
+        }
+    }
+}
+
+typedef struct {
+    const char *profile;
+    const char *titleId;
+    unsigned long long bestMod;
+} BestModCtx;
+
+static void manifestBestModCb(const char *consoleId, const char *profile, const char *titleId,
+                              const char *fingerprint, unsigned long long mod,
+                              const char *contentHash, void *ctx)
+{
+    (void)consoleId;
+    (void)fingerprint;
+    (void)contentHash;
+    BestModCtx *b = (BestModCtx *)ctx;
+    if (!profileEqual(profile, b->profile) || !titleIdEqualI(titleId, b->titleId)) {
+        return;
+    }
+    if (mod > b->bestMod) {
+        b->bestMod = mod;
+    }
+}
+
+unsigned long long manifestBestCloudMod(const char *manifest, const char *profile,
+                                        const char *titleId)
+{
+    BestModCtx ctx;
+    ctx.profile = profile ? profile : "";
+    ctx.titleId = titleId;
+    ctx.bestMod = 0;
+    manifestEachLine(manifest, manifestBestModCb, &ctx);
+    return ctx.bestMod;
+}
+
+typedef struct {
+    const char *profile;
+    const char *titleId;
+    const char *contentHash;
+    BOOL found;
+} HashMatchCtx;
+
+static void manifestHashMatchCb(const char *consoleId, const char *profile, const char *titleId,
+                                const char *fingerprint, unsigned long long mod,
+                                const char *contentHash, void *ctx)
+{
+    (void)consoleId;
+    (void)fingerprint;
+    (void)mod;
+    HashMatchCtx *h = (HashMatchCtx *)ctx;
+    if (!h->contentHash || !h->contentHash[0] || !contentHash || !contentHash[0]) {
+        return;
+    }
+    if (!profileEqual(profile, h->profile) || !titleIdEqualI(titleId, h->titleId)) {
+        return;
+    }
+    if (_stricmp(contentHash, h->contentHash) == 0) {
+        h->found = TRUE;
+    }
+}
+
+BOOL manifestShouldSkipUpload(const char *manifest, const char *consoleId, const char *profile,
+                              const char *titleId, const char *fingerprint,
+                              const char *contentHash, unsigned long long localMod)
+{
+    if (!manifest || !titleId || !titleId[0]) {
+        return FALSE;
+    }
+
+    if (contentHash && contentHash[0]) {
+        HashMatchCtx hctx;
+        hctx.profile = profile ? profile : "";
+        hctx.titleId = titleId;
+        hctx.contentHash = contentHash;
+        hctx.found = FALSE;
+        manifestEachLine(manifest, manifestHashMatchCb, &hctx);
+        if (hctx.found) {
+            return TRUE;
+        }
+    }
+
+    unsigned long long bestCloud = manifestBestCloudMod(manifest, profile, titleId);
+    if (bestCloud > 0 && localMod > 0 && localMod <= bestCloud) {
+        return TRUE;
+    }
+
+    if (fingerprint && fingerprint[0] && consoleId && consoleId[0] &&
+        manifestTitleMatches(manifest, consoleId, profile, titleId, fingerprint)) {
+        unsigned long long ownCloud = manifestCloudModUnix(manifest, consoleId, profile, titleId);
+        if (ownCloud > 0 || localMod == 0) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
 
 BOOL manifestTitleMatches(const char *manifest, const char *consoleId, const char *profile,

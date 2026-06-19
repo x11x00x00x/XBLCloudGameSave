@@ -30,6 +30,7 @@ SRCS = \
 	$(CURDIR)/src/base64.c \
 	$(CURDIR)/src/session_store.c \
 	$(CURDIR)/src/save_dates.c \
+	$(CURDIR)/src/content_hash.c \
 	$(CURDIR)/src/upload.c \
 	$(CURDIR)/src/xbmc_profiles.c \
 	$(CURDIR)/src/xbl_account.c \

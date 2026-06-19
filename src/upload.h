@@ -11,6 +11,11 @@
  * console's ~64 MB of memory minus what the TLS stack and scan structures use. */
 #define UPLOAD_MAX_RAW_BYTES (32u * 1024u * 1024u)
 
+/* Console identity scheme sent to the server. v2 derives console_id from BOTH the
+ * HDD key and the EEPROM serial so two consoles with the same cloned HDD key still
+ * appear as separate entries in My Xbox. Legacy builds omit this and keep HDD-only. */
+#define XBOX_CONSOLE_ID_SCHEME "v2"
+
 /* POSTs the EEPROM dump (base64), decrypted HDD key (hex) and serial number to
  * /api/me/xbox-saves/console-data. Returns TRUE on a 2xx response. */
 BOOL uploadConsoleData(const char *host, const char *port, const char *sessionKey,
@@ -26,12 +31,12 @@ BOOL uploadConsoleData(const char *host, const char *port, const char *sessionKe
  * server so different profiles' saves for the same game never overwrite each other.
  * profileLabel is the human-readable profile name for the website (may be NULL). */
 BOOL uploadGameDukex(const char *host, const char *port, const char *sessionKey,
-                     const char *consoleId, const char *hddKeyHex,
+                     const char *consoleId, const char *serial, const char *hddKeyHex,
                      const char *profile, const char *profileLabel,
                      const char *titleId, const char *titleName,
                      int saveCount, unsigned long long totalBytes, const char *fingerprint,
                      unsigned long long saveModifiedUnix, const char *manifestJson,
-                     const char *dukexPath);
+                     const char *contentHash, const char *dukexPath);
 
 /* GETs /api/me/xbox-saves/manifest into out (a text body of "TITLEID=FINGERPRINT"
  * lines). Returns TRUE on a 2xx response. */
@@ -47,6 +52,17 @@ BOOL manifestTitleMatches(const char *manifest, const char *consoleId, const cha
 /* Parses save_modified_unix from a manifest line (0 if missing/legacy). */
 unsigned long long manifestCloudModUnix(const char *manifest, const char *consoleId,
                                         const char *profile, const char *titleId);
+
+/* Newest save_modified_unix for title+profile across every console in the manifest. */
+unsigned long long manifestBestCloudMod(const char *manifest, const char *profile,
+                                        const char *titleId);
+
+/* TRUE when the server already has this save and local is not newer — skip upload.
+ * Matches on content_hash (any console) or when cloud's best date >= localMod.
+ * profile may be "" for the default / non-XBMC case. contentHash may be NULL. */
+BOOL manifestShouldSkipUpload(const char *manifest, const char *consoleId, const char *profile,
+                              const char *titleId, const char *fingerprint,
+                              const char *contentHash, unsigned long long localMod);
 
 /* Downloads a title's .dukex archive from /api/me/xbox-saves/download/<titleId>
  * to destPath. sourceProfile is the XBMC profile the save belongs to on the server

@@ -21,6 +21,7 @@
 #include "unzip_export.h"
 #include "upload.h"
 #include "xbmc_profiles.h"
+#include "content_hash.h"
 #include "zip_export.h"
 
 #define UDATA_PATH "E:\\UDATA"
@@ -378,9 +379,9 @@ int main(void)
         }
     }
 
-    /* 6. Per-game archives + incremental upload. Games whose saves match the
-     * server's stored fingerprint are skipped entirely (no re-zip, no upload);
-     * only new or changed saves are archived and sent. */
+    /* 6. Per-game archives + incremental upload. Skips titles already on the server
+     * (same content hash on any console, or cloud save_modified >= local). Only
+     * uploads when local is genuinely newer or the content is not stored yet. */
     static char manifest[16384];
     manifest[0] = '\0';
     if (loggedIn) {
@@ -423,6 +424,10 @@ int main(void)
                 char fp[24];
                 titleFingerprintHex(title, fp, sizeof(fp));
 
+                char contentHash[65];
+                contentHash[0] = '\0';
+                titleContentHashHex(title, contentHash, sizeof(contentHash));
+
                 /* Prefer the date pinned to this fingerprint over the raw
                  * filesystem mtime. If the content is unchanged the tracker
                  * returns the original date; otherwise we fall back to the
@@ -432,22 +437,19 @@ int main(void)
                 unsigned long long localMod = trackedMod > 0 ? trackedMod : fsMod;
 
                 if (loggedIn &&
-                    manifestTitleMatches(manifest, consoleId, profKey, title->titleId, fp)) {
-                    unsigned long long cloudMod =
-                        manifestCloudModUnix(manifest, consoleId, profKey, title->titleId);
-                    if (cloudMod > 0 || localMod == 0) {
-                        /* Server already has this exact content. Pin its true
-                         * date locally (the cloud's first-upload date is the
-                         * authority) so a later folder move can't fake "newer". */
-                        if (trackedMod == 0) {
-                            saveDatesRecord(title->titleId, profKey, fp,
-                                            cloudMod > 0 ? cloudMod : fsMod);
-                        }
-                        skipped++;
-                        ui_logf("  %s unchanged (skip)", gameName);
-                        continue; /* server already has this exact version */
+                    manifestShouldSkipUpload(manifest, consoleId, profKey, title->titleId, fp,
+                                             contentHash[0] ? contentHash : NULL, localMod)) {
+                    unsigned long long cloudMod = manifestBestCloudMod(manifest, profKey, title->titleId);
+                    if (cloudMod == 0) {
+                        cloudMod = manifestCloudModUnix(manifest, consoleId, profKey, title->titleId);
                     }
-                    ui_logf("  %s re-uploading (cloud missing save date)", gameName);
+                    if (trackedMod == 0 && (cloudMod > 0 || localMod == 0)) {
+                        saveDatesRecord(title->titleId, profKey, fp,
+                                        cloudMod > 0 ? cloudMod : fsMod);
+                    }
+                    skipped++;
+                    ui_logf("  %s unchanged (skip)", gameName);
+                    continue;
                 }
 
                 char zipPath[MAX_PATH];
@@ -471,10 +473,10 @@ int main(void)
                     char manifestJson[4096];
                     manifestJson[0] = '\0';
                     titleManifestJson(title, manifestJson, sizeof(manifestJson));
-                    if (uploadGameDukex(UPLOAD_HOST, UPLOAD_PORT, sessionKey, consoleId, hddKeyHex,
-                                        profKey, profLabel, title->titleId, title->titleName,
+                    if (uploadGameDukex(UPLOAD_HOST, UPLOAD_PORT, sessionKey, consoleId, serial,
+                                        hddKeyHex, profKey, profLabel, title->titleId, title->titleName,
                                         title->saveCount, title->totalSize, fp, saveMod,
-                                        manifestJson, dukexPath)) {
+                                        manifestJson, contentHash[0] ? contentHash : NULL, dukexPath)) {
                         uploaded++;
                         /* Pin the date we just reported to this content so future
                          * folder moves keep the same date. */
