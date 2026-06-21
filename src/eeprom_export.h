@@ -24,4 +24,9 @@ BOOL getHddKeyHex(char *out, size_t outsz);
 /* Fills out with the ASCII console serial number read from the EEPROM dump. */
 BOOL getEepromSerial(const unsigned char *eeprom, char *out, size_t outsz);
 
+/* Fills out with the console MAC address (EEPROM offset 0x40) formatted as
+ * colon-separated uppercase hex (e.g. "00:50:F2:AA:BB:CC"). out needs >= 18 bytes.
+ * Returns FALSE if the buffer is too small. */
+BOOL getEepromMac(const unsigned char *eeprom, char *out, size_t outsz);
+
 #endif

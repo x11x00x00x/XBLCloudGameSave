@@ -12,6 +12,8 @@
 /* Offsets within the EEPROM (see https://xboxdevwiki.net/EEPROM). */
 #define EEPROM_SERIAL_OFFSET 0x34
 #define EEPROM_SERIAL_LENGTH 0x0C
+#define EEPROM_MAC_OFFSET 0x40
+#define EEPROM_MAC_LENGTH 0x06
 
 BOOL dumpEeprom(unsigned char *eeprom)
 {
@@ -69,6 +71,11 @@ BOOL writeHddKeyFile(const char *path, const unsigned char *eeprom)
     }
     pos += snprintf(text + pos, sizeof(text) - pos, "Serial Number: %s\r\n", serial);
 
+    char mac[24];
+    if (getEepromMac(eeprom, mac, sizeof(mac))) {
+        pos += snprintf(text + pos, sizeof(text) - pos, "MAC Address: %s\r\n", mac);
+    }
+
     pos += snprintf(text + pos, sizeof(text) - pos,
                     "\r\nWARNING: This key unlocks your hard drive. Treat it like a "
                     "password.\r\n");
@@ -84,6 +91,23 @@ BOOL getHddKeyHex(char *out, size_t outsz)
     int pos = 0;
     for (int i = 0; i < XBOX_KEY_LENGTH; i++) {
         pos += snprintf(out + pos, outsz - pos, "%02X", XboxHDKey[i]);
+    }
+    out[pos] = '\0';
+    return TRUE;
+}
+
+BOOL getEepromMac(const unsigned char *eeprom, char *out, size_t outsz)
+{
+    /* "XX:XX:XX:XX:XX:XX" + NUL = 18 bytes. */
+    if (outsz < (size_t)(EEPROM_MAC_LENGTH * 3)) {
+        return FALSE;
+    }
+    int pos = 0;
+    for (int i = 0; i < EEPROM_MAC_LENGTH; i++) {
+        if (i) {
+            out[pos++] = ':';
+        }
+        pos += snprintf(out + pos, outsz - pos, "%02X", eeprom[EEPROM_MAC_OFFSET + i]);
     }
     out[pos] = '\0';
     return TRUE;

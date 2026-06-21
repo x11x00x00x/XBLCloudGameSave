@@ -125,6 +125,7 @@ int main(void)
     BOOL eepromOk = dumpEeprom(eeprom);
     char serial[32] = "";
     char hddKeyHex[64] = "";
+    char mac[24] = "";
     if (eepromOk) {
         if (!writeFileBytes(EEPROM_BIN_PATH, eeprom, EEPROM_SIZE)) {
             ui_logf("  WARNING: failed to write eeprom.bin");
@@ -134,7 +135,14 @@ int main(void)
         }
         getEepromSerial(eeprom, serial, sizeof(serial));
         getHddKeyHex(hddKeyHex, sizeof(hddKeyHex));
+        getEepromMac(eeprom, mac, sizeof(mac));
         ui_logf("  EEPROM and HDD key saved");
+        if (serial[0]) {
+            ui_logf("  Serial: %s", serial);
+        }
+        if (mac[0]) {
+            ui_logf("  MAC: %s", mac);
+        }
     } else {
         ui_logf("  WARNING: EEPROM read failed");
     }
